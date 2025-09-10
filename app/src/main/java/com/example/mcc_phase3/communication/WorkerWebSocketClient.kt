@@ -9,7 +9,6 @@ import org.java_websocket.client.WebSocketClient
 import org.java_websocket.handshake.ServerHandshake
 import java.net.URI
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicLong
 import org.json.JSONObject
 
 /**
@@ -25,8 +24,6 @@ class WorkerWebSocketClient(private val context: Context) {
     companion object {
         private const val TAG = "WorkerWebSocketClient"
         private const val HEARTBEAT_INTERVAL = 30000L // 30 seconds
-        private const val RECONNECT_DELAY = 5000L // 5 seconds
-        private const val MAX_RECONNECT_ATTEMPTS = 10
     }
     
     private val workerIdManager = WorkerIdManager.getInstance(context)
@@ -35,10 +32,8 @@ class WorkerWebSocketClient(private val context: Context) {
     private var webSocket: WebSocketClient? = null
     private val isConnected = AtomicBoolean(false)
     private val isRunning = AtomicBoolean(false)
-    private val reconnectAttempts = AtomicLong(0)
-    
+
     private var heartbeatJob: Job? = null
-    private var reconnectJob: Job? = null
     private val clientScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     
     // Listeners
@@ -69,8 +64,7 @@ class WorkerWebSocketClient(private val context: Context) {
                     override fun onOpen(handshake: ServerHandshake?) {
                         Log.d(TAG, "✅ WebSocket connected to $url")
                         isConnected.set(true)
-                        reconnectAttempts.set(0)
-                        
+
                         // Start heartbeat
                         startHeartbeat()
                         
@@ -97,11 +91,6 @@ class WorkerWebSocketClient(private val context: Context) {
                         
                         // Notify listeners
                         listeners.forEach { it.onDisconnected() }
-                        
-                        // Attempt reconnection if not manually disconnected
-                        if (isRunning.get() && !remote) {
-                            scheduleReconnection(url)
-                        }
                     }
                     
                     override fun onError(ex: Exception?) {
@@ -136,7 +125,6 @@ class WorkerWebSocketClient(private val context: Context) {
         Log.d(TAG, "Disconnecting WebSocket...")
         isRunning.set(false)
         stopHeartbeat()
-        reconnectJob?.cancel()
         webSocket?.close()
         webSocket = null
         isConnected.set(false)
@@ -319,30 +307,6 @@ class WorkerWebSocketClient(private val context: Context) {
     }
     
     /**
-     * Schedule reconnection attempt
-     */
-    private fun scheduleReconnection(url: String) {
-        if (reconnectAttempts.get() >= MAX_RECONNECT_ATTEMPTS) {
-            Log.e(TAG, "🚨 Max reconnection attempts reached, giving up")
-            return
-        }
-        
-        reconnectJob?.cancel()
-        reconnectJob = clientScope.launch {
-            val attempt = reconnectAttempts.incrementAndGet()
-            val delay = RECONNECT_DELAY * attempt // Exponential backoff
-            
-            Log.d(TAG, "🔄 Scheduling reconnection attempt $attempt in ${delay}ms")
-            delay(delay)
-            
-            if (isRunning.get() && !isConnected.get()) {
-                Log.d(TAG, "🔄 Attempting reconnection #$attempt")
-                connect(url)
-            }
-        }
-    }
-    
-    /**
      * Test WebSocket functionality
      */
     suspend fun testWebSocket(): Map<String, Any> {
@@ -394,7 +358,6 @@ class WorkerWebSocketClient(private val context: Context) {
         return mapOf<String, Any>(
             "is_connected" to isConnected.get(),
             "is_running" to isRunning.get(),
-            "reconnect_attempts" to reconnectAttempts.get(),
             "worker_id" to (workerIdManager.getCurrentWorkerId() ?: "unknown"),
             "task_status" to taskProcessor.getCurrentTaskStatus(),
             "heartbeat_active" to (heartbeatJob?.isActive ?: false),
